@@ -5,37 +5,66 @@ from your_script import find_best_locations
 
 app = Flask(__name__)
 
-data_cache = []
+cache = []
 last_update = None
+lock = threading.Lock()
 
-def update_data():
-    global data_cache, last_update
+UPDATE_INTERVAL = 300
+
+
+# -----------------------------
+# BACKGROUND UPDATER
+# -----------------------------
+
+def updater():
+    global cache, last_update
+
     while True:
+        start = time.time()
+
         try:
-            print("🔄 Mise à jour...")
-            data_cache = find_best_locations()
-            last_update = time.strftime("%Y-%m-%d %H:%M:%S")
-            print("✅ OK")
+            print("🔄 Calcul top sites de lancement...")
+
+            new_data = find_best_locations()
+
+            with lock:
+                cache = new_data
+                last_update = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            print("✅ Update OK")
+
         except Exception as e:
-            print("❌ Erreur :", e)
+            print("❌ Error:", e)
 
-        time.sleep(300)
+        elapsed = time.time() - start
+        time.sleep(max(0, UPDATE_INTERVAL - elapsed))
 
-threading.Thread(target=update_data, daemon=True).start()
+
+threading.Thread(target=updater, daemon=True).start()
+
+
+# -----------------------------
+# ROUTES API
+# -----------------------------
 
 @app.route("/")
 def home():
-    return {
-        "status": "🚀 API running",
-        "last_update": last_update
-    }
+    with lock:
+        return jsonify({
+            "status": "🚀 Launch Optimizer Running",
+            "last_update": last_update,
+            "top_sites_count": len(cache)
+        })
+
 
 @app.route("/data")
 def data():
-    return jsonify({
-        "last_update": last_update,
-        "results": data_cache
-    })
+    with lock:
+        return jsonify({
+            "last_update": last_update,
+            "top_5_launch_sites": cache
+        })
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=False)
