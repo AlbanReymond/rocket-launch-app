@@ -6,10 +6,14 @@ LON_RANGE = np.arange(-125, -66, 3)
 
 TOP_K = 5
 
+WEIGHTS = {
+    "rain": 0.30,
+    "wind": 0.30,
+    "cloud": 0.15,
+    "humidity": 0.10,
+    "rotation": 0.15
+}
 
-# -----------------------------
-# PHYSIQUE (rotation terrestre)
-# -----------------------------
 
 def rotation_bonus(lat):
     return 465 * np.cos(np.radians(lat))
@@ -19,33 +23,35 @@ def normalize(x, xmin, xmax):
     return np.clip((x - xmin) / (xmax - xmin), 0, 1)
 
 
-# -----------------------------
-# SCORE MÉTÉO
-# -----------------------------
+def base_score(rain, wind, cloud, humidity, lat):
 
-def compute_score(rain, wind, cloud, humidity, lat):
-    rain_s = 1 - normalize(rain, 0, 5)
-    wind_s = 1 - normalize(wind, 0, 25)
-    cloud_s = 1 - normalize(cloud, 0, 100)
-    hum_s = 1 - normalize(humidity, 0, 100)
-    rot_s = normalize(rotation_bonus(lat), 0, 465)
-
-    score = (
-        0.30 * rain_s +
-        0.30 * wind_s +
-        0.15 * cloud_s +
-        0.10 * hum_s +
-        0.15 * rot_s
-    )
-
-    return score * 100
+    return (
+        WEIGHTS["rain"] * (1 - normalize(rain, 0, 5)) +
+        WEIGHTS["wind"] * (1 - normalize(wind, 0, 25)) +
+        WEIGHTS["cloud"] * (1 - normalize(cloud, 0, 100)) +
+        WEIGHTS["humidity"] * (1 - normalize(humidity, 0, 100)) +
+        WEIGHTS["rotation"] * normalize(rotation_bonus(lat), 0, 465)
+    ) * 100
 
 
-# -----------------------------
-# METEO 15 JOURS
-# -----------------------------
+def monte_carlo_score(rain, wind, cloud, humidity, lat, n=20):
+
+    scores = []
+
+    for _ in range(n):
+
+        r = rain * np.random.normal(1, 0.1)
+        w = wind * np.random.normal(1, 0.1)
+        c = cloud * np.random.normal(1, 0.05)
+        h = humidity * np.random.normal(1, 0.05)
+
+        scores.append(base_score(r, w, c, h, lat))
+
+    return float(np.mean(scores)), float(np.std(scores))
+
 
 def get_weather_15d(lat, lon):
+
     url = "https://api.open-meteo.com/v1/forecast"
 
     params = {
@@ -61,11 +67,8 @@ def get_weather_15d(lat, lon):
         return None
 
 
-# -----------------------------
-# ANALYSE D'UN SITE
-# -----------------------------
-
 def analyze_location(lat, lon):
+
     data = get_weather_15d(lat, lon)
 
     if not data or "daily" not in data:
@@ -75,7 +78,7 @@ def analyze_location(lat, lon):
 
     for i in range(len(data["daily"]["time"])):
 
-        score = compute_score(
+        mean, risk = monte_carlo_score(
             data["daily"]["precipitation_sum"][i],
             data["daily"]["windspeed_10m_max"][i],
             data["daily"]["cloudcover_mean"][i],
@@ -83,41 +86,19 @@ def analyze_location(lat, lon):
             lat
         )
 
+        score = mean - (risk * 0.5)
+
         if best is None or score > best["score"]:
             best = {
                 "lat": float(lat),
                 "lon": float(lon),
                 "date": data["daily"]["time"][i],
-                "score": round(score, 2)
+                "score": round(score, 2),
+                "risk": round(risk, 2)
             }
 
     return best
 
-
-# -----------------------------
-# 🧠 “IA” DE SELECTION DE LAUNCH WINDOW
-# -----------------------------
-# logique : cherche la meilleure combinaison (lieu + jour)
-
-def find_best_launch_window(all_results):
-    """
-    pseudo IA :
-    - trie globalement tous les points temporels
-    - détecte meilleure fenêtre globale
-    """
-
-    if not all_results:
-        return None
-
-    # tri global (tous sites + toutes dates)
-    best = max(all_results, key=lambda x: x["score"])
-
-    return best
-
-
-# -----------------------------
-# OPTIMISATION GLOBALE
-# -----------------------------
 
 def find_best_locations():
 
@@ -125,19 +106,10 @@ def find_best_locations():
 
     for lat in LAT_RANGE:
         for lon in LON_RANGE:
-
             res = analyze_location(lat, lon)
-
             if res:
                 results.append(res)
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    top_sites = results[:TOP_K]
-
-    best_launch_window = find_best_launch_window(top_sites)
-
-    return {
-        "top_sites": top_sites,
-        "best_launch_window": best_launch_window
-    }
+    return results[:TOP_K]
