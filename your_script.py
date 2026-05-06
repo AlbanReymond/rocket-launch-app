@@ -1,7 +1,6 @@
 import requests
 import numpy as np
 
-# USA bounding box approx
 LAT_RANGE = np.arange(24, 51, 2)
 LON_RANGE = np.arange(-125, -66, 3)
 
@@ -21,14 +20,10 @@ def normalize(x, xmin, xmax):
 
 
 # -----------------------------
-# SCORE METEO MULTI-JOURS
+# SCORE MÉTÉO
 # -----------------------------
 
 def compute_score(rain, wind, cloud, humidity, lat):
-    """
-    Score normalisé 0-100
-    """
-
     rain_s = 1 - normalize(rain, 0, 5)
     wind_s = 1 - normalize(wind, 0, 25)
     cloud_s = 1 - normalize(cloud, 0, 100)
@@ -43,7 +38,7 @@ def compute_score(rain, wind, cloud, humidity, lat):
         0.15 * rot_s
     )
 
-    return round(score * 100, 2)
+    return score * 100
 
 
 # -----------------------------
@@ -67,7 +62,7 @@ def get_weather_15d(lat, lon):
 
 
 # -----------------------------
-# ANALYSE POINT
+# ANALYSE D'UN SITE
 # -----------------------------
 
 def analyze_location(lat, lon):
@@ -93,28 +88,56 @@ def analyze_location(lat, lon):
                 "lat": float(lat),
                 "lon": float(lon),
                 "date": data["daily"]["time"][i],
-                "score": score,
-                "rain": data["daily"]["precipitation_sum"][i],
-                "wind": data["daily"]["windspeed_10m_max"][i],
-                "cloud": data["daily"]["cloudcover_mean"][i]
+                "score": round(score, 2)
             }
 
     return best
 
 
 # -----------------------------
-# OPTIMISATION GLOBALE USA
+# 🧠 “IA” DE SELECTION DE LAUNCH WINDOW
+# -----------------------------
+# logique : cherche la meilleure combinaison (lieu + jour)
+
+def find_best_launch_window(all_results):
+    """
+    pseudo IA :
+    - trie globalement tous les points temporels
+    - détecte meilleure fenêtre globale
+    """
+
+    if not all_results:
+        return None
+
+    # tri global (tous sites + toutes dates)
+    best = max(all_results, key=lambda x: x["score"])
+
+    return best
+
+
+# -----------------------------
+# OPTIMISATION GLOBALE
 # -----------------------------
 
 def find_best_locations():
+
     results = []
 
     for lat in LAT_RANGE:
         for lon in LON_RANGE:
+
             res = analyze_location(lat, lon)
+
             if res:
                 results.append(res)
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    return results[:TOP_K]
+    top_sites = results[:TOP_K]
+
+    best_launch_window = find_best_launch_window(top_sites)
+
+    return {
+        "top_sites": top_sites,
+        "best_launch_window": best_launch_window
+    }
