@@ -1,120 +1,138 @@
-import requests
-import numpy as np
+from flask import Flask, jsonify, render_template_string
+import threading
+import time
+from your_script import find_best_locations
 
-# USA bounding box approx
-LAT_RANGE = np.arange(24, 51, 2)
-LON_RANGE = np.arange(-125, -66, 3)
+app = Flask(__name__)
 
-TOP_K = 5
+cache = {
+    "top_sites": [],
+    "best_launch_window": None
+}
 
+last_update = None
+lock = threading.Lock()
 
-# -----------------------------
-# PHYSIQUE (rotation terrestre)
-# -----------------------------
-
-def rotation_bonus(lat):
-    return 465 * np.cos(np.radians(lat))
-
-
-def normalize(x, xmin, xmax):
-    return np.clip((x - xmin) / (xmax - xmin), 0, 1)
+UPDATE_INTERVAL = 300
 
 
 # -----------------------------
-# SCORE METEO MULTI-JOURS
+# BACKGROUND UPDATE
 # -----------------------------
 
-def compute_score(rain, wind, cloud, humidity, lat):
-    """
-    Score normalisé 0-100
-    """
+def updater():
 
-    rain_s = 1 - normalize(rain, 0, 5)
-    wind_s = 1 - normalize(wind, 0, 25)
-    cloud_s = 1 - normalize(cloud, 0, 100)
-    hum_s = 1 - normalize(humidity, 0, 100)
-    rot_s = normalize(rotation_bonus(lat), 0, 465)
+    global cache, last_update
 
-    score = (
-        0.30 * rain_s +
-        0.30 * wind_s +
-        0.15 * cloud_s +
-        0.10 * hum_s +
-        0.15 * rot_s
-    )
+    while True:
+        start = time.time()
 
-    return round(score * 100, 2)
+        try:
+            print("🧠 IA computing best launch windows...")
+
+            new_data = find_best_locations()
+
+            with lock:
+                cache = new_data
+                last_update = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            print("✅ AI update done")
+
+        except Exception as e:
+            print("❌ Error:", e)
+
+        time.sleep(max(0, UPDATE_INTERVAL - (time.time() - start)))
 
 
-# -----------------------------
-# METEO 15 JOURS
-# -----------------------------
-
-def get_weather_15d(lat, lon):
-    url = "https://api.open-meteo.com/v1/forecast"
-
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "daily": "precipitation_sum,windspeed_10m_max,cloudcover_mean,relativehumidity_2m_mean",
-        "forecast_days": 15
-    }
-
-    try:
-        return requests.get(url, params=params, timeout=6).json()
-    except:
-        return None
+threading.Thread(target=updater, daemon=True).start()
 
 
 # -----------------------------
-# ANALYSE POINT
+# API
 # -----------------------------
 
-def analyze_location(lat, lon):
-    data = get_weather_15d(lat, lon)
+@app.route("/data")
+def data():
+    with lock:
+        return jsonify({
+            "last_update": last_update,
+            "top_sites": cache["top_sites"],
+            "best_launch_window": cache["best_launch_window"]
+        })
 
-    if not data or "daily" not in data:
-        return None
 
-    best = None
+# -----------------------------
+# 🌍 CESIUM 3D GLOBE
+# -----------------------------
 
-    for i in range(len(data["daily"]["time"])):
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AI Launch Window Optimizer</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <style>
+    html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; }
+  </style>
+</head>
 
-        score = compute_score(
-            data["daily"]["precipitation_sum"][i],
-            data["daily"]["windspeed_10m_max"][i],
-            data["daily"]["cloudcover_mean"][i],
-            data["daily"]["relativehumidity_2m_mean"][i],
-            lat
-        )
+<body>
+<div id="cesiumContainer"></div>
 
-        if best is None or score > best["score"]:
-            best = {
-                "lat": float(lat),
-                "lon": float(lon),
-                "date": data["daily"]["time"][i],
-                "score": score,
-                "rain": data["daily"]["precipitation_sum"][i],
-                "wind": data["daily"]["windspeed_10m_max"][i],
-                "cloud": data["daily"]["cloudcover_mean"][i]
+<script>
+const viewer = new Cesium.Viewer('cesiumContainer', {
+    terrainProvider: Cesium.createWorldTerrain()
+});
+
+async function loadData() {
+
+    const res = await fetch('/data');
+    const data = await res.json();
+
+    viewer.entities.removeAll();
+
+    // TOP 5 sites
+    data.top_sites.forEach(p => {
+        viewer.entities.add({
+            position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat),
+            point: { pixelSize: 12, color: Cesium.Color.RED },
+            label: {
+                text: "Score: " + p.score,
+                font: "14px sans-serif"
             }
+        });
+    });
 
-    return best
+    // BEST LAUNCH WINDOW (highlight gold)
+    if (data.best_launch_window) {
+        const b = data.best_launch_window;
+
+        viewer.entities.add({
+            position: Cesium.Cartesian3.fromDegrees(b.lon, b.lat),
+            point: { pixelSize: 18, color: Cesium.Color.GOLD },
+            label: {
+                text: "🔥 BEST WINDOW " + b.date,
+                font: "16px sans-serif",
+                fillColor: Cesium.Color.YELLOW
+            }
+        });
+    }
+}
+
+setInterval(loadData, 5000);
+loadData();
+
+</script>
+</body>
+</html>
+"""
 
 
-# -----------------------------
-# OPTIMISATION GLOBALE USA
-# -----------------------------
+@app.route("/")
+def home():
+    return render_template_string(HTML)
 
-def find_best_locations():
-    results = []
 
-    for lat in LAT_RANGE:
-        for lon in LON_RANGE:
-            res = analyze_location(lat, lon)
-            if res:
-                results.append(res)
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-
-    return results[:TOP_K]
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
